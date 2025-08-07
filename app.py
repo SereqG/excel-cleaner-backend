@@ -18,15 +18,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-# Specify allowed origins explicitly instead of wildcard
 CORS(app, resources={r"/*": {"origins": "http://localhost:8080"}}, supports_credentials=True)
 
-# Add a secret key for security (use environment variable in production)
-app.secret_key = os.environ.get("SECRET_KEY", "dev_key_change_in_production")
-
-# Define constants
 ALLOWED_EXTENSIONS = {'xlsx'}
-MAX_CONTENT_LENGTH = 16 * 1024 * 1024  # 16MB max file size
+MAX_CONTENT_LENGTH = 2 * 1024 * 1024 # 2MB limit
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
 
@@ -65,27 +60,14 @@ def is_xlsx_file(file):
         return False
 
 
-@app.errorhandler(413)
-def request_entity_too_large(error):
-    """Handle file too large errors"""
-    return jsonify({"error": f"File too large. Maximum size is {MAX_CONTENT_LENGTH/1024/1024}MB"}), 413
-
-
-@app.errorhandler(Exception)
-def handle_exception(e):
-    """Global exception handler"""
-    logger.error(f"Unhandled exception: {e}\n{traceback.format_exc()}")
-    return jsonify({"error": "An unexpected error occurred"}), 500
-
-
 @app.route("/get-columns", methods=["POST"])
 def get_columns():
-    """Get column names and types from an Excel file"""
     try:
+        file = request.files.get("file")
+        
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
             
-        file = request.files.get("file")
         if not file or file.filename == '':
             return jsonify({"error": "No file selected"}), 400
         
@@ -116,6 +98,8 @@ def get_columns():
                 col_type = "other"
             
             columns.append({"name": str(col), "type": col_type})
+        
+        logger.info(f"Extracted columns: {columns}")
         
         return jsonify({"columns": columns}), 200
     
@@ -210,6 +194,7 @@ def format_file():
 
         # Convert to dict for JSON serialization
         formatted_data = df.where(pd.notnull(df), None).to_dict(orient='records')
+
         return jsonify({"formattedData": formatted_data}), 200
         
     except Exception as e:
@@ -220,13 +205,21 @@ def format_file():
 @app.route("/download-formatted-file", methods=["POST"])
 def download_formatted_file():
     data = request.form.get("formattedData")
+    columns = request.form.get("columns")
+
+    print(f"columns: {columns}")  # Debugging line to check columns
+
     if not data:
         return jsonify({"error": "No formatted data provided"}), 400
     try:
         formatted_data = json.loads(data)
         df = pd.DataFrame(formatted_data)
+        new_df = pd.DataFrame(columns=json.loads(columns))
+        for col in json.loads(columns):
+            new_df[col] = df[col]
+        print(new_df.head())  # Debugging line to check the DataFrame structure
         output = BytesIO()
-        df.to_excel(output, index=False, engine='openpyxl')
+        new_df.to_excel(output, index=False, engine='openpyxl')
         output.seek(0)
 
         return send_file(
