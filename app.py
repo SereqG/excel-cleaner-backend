@@ -1,3 +1,4 @@
+from io import BytesIO
 from flask import Flask, request, jsonify
 import json
 import os
@@ -7,6 +8,7 @@ import pandas as pd
 import numpy as np
 from werkzeug.utils import secure_filename
 import traceback
+from flask import send_file
 
 # Configure logging
 logging.basicConfig(
@@ -207,12 +209,35 @@ def format_file():
                     logger.warning(f"Error formatting date for column {column_name}: {e}")
 
         # Convert to dict for JSON serialization
-        preview_data = df.head().where(pd.notnull(df.head()), None).to_dict(orient='records')
-        return jsonify({"preview": preview_data}), 200
+        formatted_data = df.where(pd.notnull(df), None).to_dict(orient='records')
+        return jsonify({"formattedData": formatted_data}), 200
         
     except Exception as e:
         logger.error(f"Error in format_file: {e}\n{traceback.format_exc()}")
         return jsonify({"error": "Failed to process file"}), 500
+    
+
+@app.route("/download-formatted-file", methods=["POST"])
+def download_formatted_file():
+    data = request.form.get("formattedData")
+    if not data:
+        return jsonify({"error": "No formatted data provided"}), 400
+    try:
+        formatted_data = json.loads(data)
+        df = pd.DataFrame(formatted_data)
+        output = BytesIO()
+        df.to_excel(output, index=False, engine='openpyxl')
+        output.seek(0)
+
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name="formatted_file.xlsx",
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )  
+    except Exception as e:
+        logger.error(f"Error in download_formatted_file: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": "Failed to generate formatted file"}), 500
 
 
 if __name__ == "__main__":
