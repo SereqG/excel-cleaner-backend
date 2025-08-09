@@ -127,7 +127,6 @@ def format_file():
         
         try:
             df = pd.read_excel(file)
-            df.replace(np.nan, "", inplace=True)
         except Exception as e:
             logger.error(f"Error reading Excel file: {e}")
             return jsonify({"error": "Could not read Excel file. The file may be corrupted."}), 400
@@ -144,6 +143,16 @@ def format_file():
             # Validate role has required fields
             if "columnName" not in role:
                 continue
+
+            if role.get("replaceBlankSpacesWith") is not None:
+                column_name = role.get("columnName")
+                if column_name not in df.columns:
+                    logger.warning(f"Column {column_name} not found in dataframe")
+                    continue
+                
+                # Replace blank spaces with specified value
+                replace_value = role["replaceBlankSpacesWith"]
+                df[column_name].replace(np.nan, replace_value, inplace=True)
                 
             column_name = role.get("columnName")
             if column_name not in df.columns:
@@ -193,6 +202,7 @@ def format_file():
                     logger.warning(f"Error formatting date for column {column_name}: {e}")
 
         # Convert to dict for JSON serialization
+        df.replace(np.nan, None, inplace=True)  # Replace NaN with None for JSON serialization
         formatted_data = df.where(pd.notnull(df), None).to_dict(orient='records')
 
         return jsonify({"formattedData": formatted_data}), 200
