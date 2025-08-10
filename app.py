@@ -9,7 +9,14 @@ import numpy as np
 from werkzeug.utils import secure_filename
 import traceback
 from flask import send_file
+from dotenv import load_dotenv
+from langchain_core.messages import HumanMessage
 
+# Load environment variables from .env file
+load_dotenv()
+config = {
+    "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY")
+}
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +31,7 @@ ALLOWED_EXTENSIONS = {'xlsx'}
 MAX_CONTENT_LENGTH = 2 * 1024 * 1024 # 2MB limit
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
+SYSTEM_PROMPT_ASK_MODE = "You are a helpful assistant that helps user solving their problems with messy excels. User will provide you a message describing their issue and your job is to provide useful suggestions to fix the problem / improve the excel file. I will provide you pandas dataframe and you will analize it and provide a response. Let's assume that user isn't very technical so your answear should be easy to understand. Your response should be relatevely short but informative and long enough to cover the topic in details. If the prompt is unclear, ask clarifying questions. If the prompt isn't excel related, response with 'I can't help with non-excel related issues.' Always respond in the language that the prompt has been written"
 
 def is_xlsx_file(file):
     """Check if the uploaded file is a valid Excel (.xlsx) file"""
@@ -241,6 +249,65 @@ def download_formatted_file():
     except Exception as e:
         logger.error(f"Error in download_formatted_file: {e}\n{traceback.format_exc()}")
         return jsonify({"error": "Failed to generate formatted file"}), 500
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    try:
+        # Validate inputs
+        user_prompt = request.form.get("user_prompt")
+        if not user_prompt:
+            return jsonify({"error": "No user prompt provided"}), 400
+            
+        file = request.files.get("file")
+        if not file or not is_xlsx_file(file):
+            return jsonify({"error": "Invalid or no file provided"}), 400
+
+        # Read Excel file
+        try:
+            df = pd.read_excel(file)
+            if df.empty:
+                return jsonify({"error": "The uploaded file is empty"}), 400
+        except Exception as e:
+            logger.error(f"Error reading Excel file: {e}")
+            return jsonify({"error": "Could not read Excel file"}), 400
+
+        # Initialize chat model (Updated import and initialization)
+        try:
+            from langchain_openai import ChatOpenAI
+            
+            model = ChatOpenAI(
+                model="gpt-4o-mini",
+                api_key=config["OPENAI_API_KEY"],
+                temperature=0.7
+            )
+        except Exception as e:
+            logger.error(f"Error initializing chat model: {e}")
+            return jsonify({"error": "Could not initialize AI model"}), 500
+
+        # Prepare context for the model
+        df_info = f"""
+        DataFrame Info:
+        - Columns: {', '.join(df.columns.tolist())}
+        - Shape: {df.shape}
+        - Sample data (first 5 rows):
+        {df.head().to_string()}
+        """
+
+        # Combine system prompt with user prompt and dataframe info
+        full_prompt = f"{SYSTEM_PROMPT_ASK_MODE}\n\nUser Question: {user_prompt}\n\n{df_info}"
+
+        # Get model response (Fixed: pass list of messages)
+        try:
+            result = model.invoke([HumanMessage(content=full_prompt)])
+            return jsonify({"response": result.content}), 200
+        except Exception as e:
+            logger.error(f"Error getting model response: {e}")
+            return jsonify({"error": "Failed to get AI response"}), 500
+
+    except Exception as e:
+        logger.error(f"Error in chat endpoint: {e}\n{traceback.format_exc()}")
+        return jsonify({"error": "Internal server error"}), 500
 
 
 if __name__ == "__main__":
