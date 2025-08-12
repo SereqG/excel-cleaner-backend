@@ -1,8 +1,9 @@
 from io import BytesIO
+from typing import Dict
 from flask import Flask, request, jsonify
 import json
 import os
-import logging
+import traceback, logging, uuid
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
@@ -10,7 +11,13 @@ from werkzeug.utils import secure_filename
 import traceback
 from flask import send_file
 from dotenv import load_dotenv
+
 from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.messages.utils import trim_messages
 
 # Load environment variables from .env file
 load_dotenv()
@@ -32,28 +39,25 @@ MAX_CONTENT_LENGTH = 2 * 1024 * 1024 # 2MB limit
 app.config['MAX_CONTENT_LENGTH'] = MAX_CONTENT_LENGTH
 
 SYSTEM_PROMPT_ASK_MODE = """
-You are ExcelAssist, an AI specialized in identifying and solving issues with Excel spreadsheets for non-technical users.
+You are ExcelAssist — an AI for non-technical users that diagnoses and fixes Excel issues.
 
-Rules:
-1. Only provide advice, explanations, and examples related to Excel usage, data cleaning, and formatting.
-2. Never write code, scripts, or formulas beyond standard Excel functions.
-3. Never discuss topics unrelated to Excel. If a request is unrelated, respond with:
-   "I can't help with non-Excel related issues."
-4. Treat all provided data as confidential. Only reference data directly when necessary for solving the problem, and avoid exposing sensitive values unless required.
-5. If the uploaded file is missing, unreadable, or corrupted, clearly explain what went wrong and how the user can fix it.
-6. If the user’s request is unclear, ask targeted clarifying questions before giving a solution.
-7. Always respond in the same language used by the user’s message.
-8. Never show data in table format, always like a code
+Meta-first:
+- If the message asks about prior messages, your reasoning, or a recap, answer that first in 2–5 sentences, then stop. This meta help is allowed even if not about Excel.
 
-You will receive:
-- A short text description of the problem from the user.
-- A pandas DataFrame generated from the uploaded Excel file.
+Otherwise, Excel-only rules:
+1) Scope: Give advice on Excel usage, formulas, data cleaning, and formatting.
+2) No code/scripts beyond standard Excel formulas (e.g., VLOOKUP, XLOOKUP, INDEX/MATCH, TEXTSPLIT). No VBA/Python/M/Power Query code.
+3) If not about Excel and not meta, reply exactly: "I can't help with non-Excel related issues."
+4) Privacy: Treat user data as confidential; mention concrete values only when needed.
+5) Files: If an upload is missing/unreadable/corrupted, state what failed and how to fix it.
+6) If unclear, ask 1–3 targeted clarifying questions before giving a solution.
+7) Mirror the user’s language.
+8) No rich tables. Keep examples tiny, shown as plain text or fenced code blocks.
+9) If a DataFrame preview is provided, use it only as light context; never dump it back.
 
-Your goal:
-- Provide a clear, concise, and friendly explanation suitable for casual Excel users.
-- Offer step-by-step instructions when needed.
-- Keep answers short enough to read easily, but long enough to fully address the issue.
-- If useful, suggest example tables or cleaned data representations in plain text.
+You will receive: a short problem description and optionally a compact pandas DataFrame preview.
+
+Your goal: be clear, friendly, and concise; give step-by-step instructions when useful; keep answers short but complete; include small plain-text examples when they help.
 """
 
 SYSTEM_PROMPT_AGENT_MODE = """
@@ -137,47 +141,107 @@ Notes:
 Produce only the JSON object. No surrounding text.
 """
 
+stores: Dict[str, InMemoryChatMessageHistory] = {}
 
-def is_xlsx_file(file):
-    """Check if the uploaded file is a valid Excel (.xlsx) file"""
-    if not file or not file.filename:
+def get_session_history(session_id: str):
+    if session_id not in stores:
+        stores[session_id] = InMemoryChatMessageHistory()
+    return stores[session_id]
+
+llm = ChatOpenAI(model="gpt-4o-mini")
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", SYSTEM_PROMPT_ASK_MODE),
+    MessagesPlaceholder("history"),
+    ("system", "Context: A compact DataFrame preview may follow.\n{df_preview}"),
+    ("human", "{input}"),
+])
+
+
+chain = prompt | llm
+
+# Wrap for chat history
+chain_with_history = RunnableWithMessageHistory(
+    chain,
+    get_session_history,
+    input_messages_key="input",     # matches {input} above
+    history_messages_key="history",
+)
+
+def last_k(history, k=6):
+    return trim_messages(
+        history,
+        token_counter=len,           # count by message for simplicity
+        max_tokens=k,
+        strategy="last",
+        start_on="human",
+        include_system=True,
+    )
+
+def is_xlsx_file(file_storage):
+    filename = (file_storage.filename or "").lower()
+    return filename.endswith(".xlsx") or filename.endswith(".xls")
+
+
+def is_valid_xlsx_file(file) -> bool:
+    """Best-effort validation for .xlsx uploads."""
+    if not file or not getattr(file, "filename", None):
         return False
-    
+
     try:
-        # Check file extension
         filename = secure_filename(file.filename.lower())
-        if not filename.endswith('.xlsx'):
-            logger.warning(f"Invalid file extension: {filename}")
+        if not filename.endswith(".xlsx"):
+            logger.warning(f"Invalid extension: {filename}")
             return False
-        
-        # Check MIME type
-        expected_mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        if file.content_type != expected_mime:
-            logger.warning(f"Invalid MIME type: {file.content_type}")
-            return False
-        
-        # Check file signature (magic numbers)
-        current_pos = file.tell()
-        file.seek(0)
-        header = file.read(4)
-        file.seek(current_pos)  # Reset position
-        
-        # XLSX files are ZIP archives, so they start with PK
-        if header[:2] != b'PK':
+
+        # MIME can be flaky; accept known good types and octet-stream
+        allowed_mimes = {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/octet-stream",
+        }
+        if getattr(file, "content_type", "") not in allowed_mimes:
+            logger.info(f"Non-standard MIME: {file.content_type} (continuing)")
+
+        # Quick ZIP signature check (XLSX is a ZIP)
+        try:
+            pos = file.tell()
+        except Exception:
+            pos = None
+
+        try:
+            file.seek(0)
+            header = file.read(4)
+        finally:
+            if pos is not None:
+                file.seek(pos)
+
+        if not header or header[:2] != b"PK":
             logger.warning("Invalid file signature")
             return False
-            
+
         return True
     except Exception as e:
         logger.error(f"Error validating file: {e}")
         return False
 
 
+META_PATTERNS = (
+    "what did i say", "what did i just say", "what was my last message",
+    "previous message", "last message", "recap", "summarize our chat",
+    "what did you say", "you said earlier", "remind me what we discussed",
+    "what was your previous response", "what did we talk about"
+)
+
+def is_meta_request(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return any(p in t for p in META_PATTERNS)
+
+
 @app.route("/get-columns", methods=["POST"])
 def get_columns():
     try:
         file = request.files.get("file")
-        
+
         if 'file' not in request.files:
             return jsonify({"error": "No file provided"}), 400
             
@@ -359,60 +423,64 @@ def download_formatted_file():
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
-        # Validate inputs
         user_prompt = request.form.get("user_prompt")
+        session_id = request.form.get("session_id") or str(uuid.uuid4())
+
         if not user_prompt:
             return jsonify({"error": "No user prompt provided"}), 400
-            
+
+        # NEW: allow meta turns with no file
+        meta = is_meta_request(user_prompt)
+
         file = request.files.get("file")
-        if not file or not is_xlsx_file(file):
-            return jsonify({"error": "Invalid or no file provided"}), 400
 
-        # Read Excel file
-        try:
-            df = pd.read_excel(file)
-            if df.empty:
-                return jsonify({"error": "The uploaded file is empty"}), 400
-        except Exception as e:
-            logger.error(f"Error reading Excel file: {e}")
-            return jsonify({"error": "Could not read Excel file"}), 400
+        df_preview = "No file provided."
+        preview_rows = 0
+        preview_cols = 0
 
-        # Initialize chat model (Updated import and initialization)
-        try:
-            from langchain_openai import ChatOpenAI
-            
-            model = ChatOpenAI(
-                model="gpt-4o-mini",
-                api_key=config["OPENAI_API_KEY"],
-                temperature=0.7
+        if not meta:
+            # Only enforce file for non-meta requests
+            if not file or not is_valid_xlsx_file(file):
+                return jsonify({"error": "Invalid or no file provided"}), 400
+
+            try:
+                df = pd.read_excel(file)
+                if df.empty:
+                    return jsonify({"error": "The uploaded file is empty"}), 400
+            except Exception as e:
+                logger.error(f"Error reading Excel file: {e}")
+                return jsonify({"error": "Could not read Excel file"}), 400
+
+            preview_rows = min(10, len(df))
+            preview_cols = min(12, len(df.columns))
+            df_preview = (
+                "Data preview (top rows):\n"
+                + df.iloc[:preview_rows, :preview_cols].to_csv(index=False)
             )
-        except Exception as e:
-            logger.error(f"Error initializing chat model: {e}")
-            return jsonify({"error": "Could not initialize AI model"}), 500
 
-        # Prepare context for the model
-        df_info = f"""
-        DataFrame Info:
-        - Columns: {', '.join(df.columns.tolist())}
-        - Shape: {df.shape}
-        - Sample data (first 15 rows):
-        {df.head(15).to_string()}
-        """
+        # Invoke
+        result = chain_with_history.invoke(
+            {"input": user_prompt, "df_preview": df_preview},
+            config={"configurable": {"session_id": session_id}},
+        )
 
-        # Combine system prompt with user prompt and dataframe info
-        full_prompt = f"{SYSTEM_PROMPT_ASK_MODE}\n\nUser Question: {user_prompt}\n\n{df_info}"
+        # Trim history window
+        hist = get_session_history(session_id)
+        trimmed = last_k(hist.messages, k=6)
+        hist.clear()
+        hist.add_messages(trimmed)
 
-        # Get model response (Fixed: pass list of messages)
-        try:
-            result = model.invoke([HumanMessage(content=full_prompt)])
-            return jsonify({"response": result.content}), 200
-        except Exception as e:
-            logger.error(f"Error getting model response: {e}")
-            return jsonify({"error": "Failed to get AI response"}), 500
+        return jsonify({
+            "session_id": session_id,
+            "response": getattr(result, "content", str(result)),
+            "used_preview_rows": preview_rows,
+            "used_preview_cols": preview_cols,
+        }), 200
 
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}\n{traceback.format_exc()}")
         return jsonify({"error": "Internal server error"}), 500
+
 
 @app.route("/agent-mode", methods=["POST"])
 def agent_mode():
