@@ -1,6 +1,10 @@
 from langchain.chat_models import init_chat_model
 from langchain_core.rate_limiters import InMemoryRateLimiter
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.history import RunnableWithMessageHistory
+
+from utils.last_k import last_k
+from utils.get_session_history import get_session_history
 
 from flask import Blueprint, request, jsonify
 
@@ -19,17 +23,23 @@ rate_limiter = InMemoryRateLimiter(
     max_bucket_size=3
 )
 
-llm_model = init_chat_model("gpt-4o-mini", model_provider="openai", temperature=0.0, max_tokens=200, max_retries=3, rate_limiter=rate_limiter)
+llm_model = init_chat_model("gpt-4o-mini", model_provider="openai", temperature=0.3, max_tokens=200, max_retries=3, rate_limiter=rate_limiter)
 
 prompt = ChatPromptTemplate.from_messages([
     ("system", SYSTEM_PROMPT_ASK_MODE),
+    MessagesPlaceholder("history"),
     ("system", "Context: A compact DataFrame preview may follow.\n{df_preview}"),
     ("human", "{input}"),
 ])
 
 chain = prompt | llm_model
 
-
+chain_with_history = RunnableWithMessageHistory(
+    chain,
+    get_session_history,
+    input_messages_key="input",     # matches {input} above
+    history_messages_key="history",
+)
 
 @chat_mode_bp.route("/chat", methods=["POST"])
 def chat():
@@ -53,17 +63,26 @@ def chat():
             + df.iloc[:preview_rows, :preview_cols].to_csv(index=False)
         )
 
-        response = chain.invoke({
-            "input": user_prompt,
-            "df_preview": df_preview
-        })
-
         if not user_prompt:
             return jsonify({"error": "No user prompt provided"}), 400
+    
+        result = chain_with_history.invoke(
+            {"input": user_prompt, "df_preview": df_preview},
+            config={"configurable": {"session_id": session_id}},
+        )
+
+        # Trim history window
+        hist = get_session_history(session_id)
+        trimmed = last_k(hist.messages, k=6)
+        hist.clear()
+        hist.add_messages(trimmed)
 
         return jsonify({
-            "response": response.content
-        })
+            "session_id": session_id,
+            "response": getattr(result, "content", str(result)),
+            "used_preview_rows": preview_rows,
+            "used_preview_cols": preview_cols,
+        }), 200
 
     except Exception as e:
         logger.error(f"Error in chat endpoint: {e}\n{traceback.format_exc()}")
