@@ -1,76 +1,331 @@
+from typing import Dict, Any, Optional, Union, List
 from langchain_core.tools import tool
 import pandas as pd
 
 @tool
-def rename_column(df, old_name, new_name):
+def rename_columns(df, column_mapping: Dict[str, str]) -> str:
     """
-    This tool renames a column name in a DataFrame. 
-    Use this tool whenever you need to rename a column name.
-    Parameters:
-    - df: The DataFrame to modify.
-    - old_name: The current name of the column.
-    - new_name: The new name for the column.
+    Renames columns in a pandas DataFrame (direct DataFrame input).
+    
+    Args:
+        df: Input pandas DataFrame (leave null for now).
+        column_mapping: Dictionary mapping old column names to new column names
+
+    Returns:
+        dict: A dictionary with:
+            - "message": String describing the operation result and showing the new column names.
+            - "df": The DataFrame with renamed columns (if not inplace).
     """
-    df = df.rename(columns={old_name: new_name})
-    return df
+    print("column_mapping:", column_mapping)
+    inplace = False
+    try:
+        # Validate inputs
+        if not isinstance(df, pd.DataFrame):
+            return "Error: Input must be a pandas DataFrame"
+        
+        if not isinstance(column_mapping, dict):
+            return "Error: column_mapping must be a dictionary"
+        
+        # Store original columns for comparison
+        original_columns = list(df.columns)
+        
+        # Check if all columns to rename exist
+        missing_cols = [col for col in column_mapping.keys() if col not in df.columns]
+        if missing_cols:
+            return f"Error: The following columns do not exist in the DataFrame: {missing_cols}"
+        
+        # Perform the renaming
+        if inplace:
+            df.rename(columns=column_mapping, inplace=True)
+            result_df = df
+            action = "modified in-place"
+        else:
+            result_df = df.rename(columns=column_mapping)
+            action = "created new DataFrame with renamed columns"
+        
+        # Prepare result message
+        renamed_columns = {old: new for old, new in column_mapping.items() if old in original_columns}
+        new_columns = list(result_df.columns)
+        
+        result_msg = f"Successfully {action}.\n"
+        result_msg += f"Renamed columns: {renamed_columns}\n"
+        result_msg += f"New column names: {new_columns}"
+        
+        if not inplace:
+            result_msg += f"\nNote: Original DataFrame unchanged. New DataFrame created."
+
+        return {"message": result_msg, "df": result_df}
+
+    except Exception as e:
+        return f"Error renaming columns: {str(e)}"
+    
 
 @tool
-def replace_value(df, column, old_value, new_value):
+def replace_values(df, value_mapping: Dict[Any, Any], columns: Optional[List[str]] = None) -> Dict[str, Union[str, pd.DataFrame]]:
     """
-    This tool replaces a value in a DataFrame column.
-    Use this tool whenever you need to replace a value in a column.
-    Parameters:
-    - df: The DataFrame to modify.
-    - column: The name of the column to modify.
-    - old_value: The value to replace.
-    - new_value: The new value to replace the old value.
+    Replace values in a pandas DataFrame (direct DataFrame input).
+    
+    Args:
+        df: Input pandas DataFrame (leave null for now).
+        value_mapping: Dictionary mapping old values to new values (supports any type including None/null)
+        columns: List of column names to apply replacements to. If None, applies to all columns
+    
+    Returns:
+        dict: A dictionary with:
+            - "message": String describing the operation result.
+            - "df": The DataFrame with replaced values.
     """
-    df[column] = df[column].replace(old_value, new_value)
-    return df
+    inplace = False
+    try:
+        # Validate inputs
+        if not isinstance(df, pd.DataFrame):
+            return {"message": "Error: Input must be a pandas DataFrame", "df": None}
+        
+        if not isinstance(value_mapping, dict):
+            return {"message": "Error: value_mapping must be a dictionary", "df": df}
+        
+        # Validate columns if provided
+        if columns is not None:
+            if not isinstance(columns, list):
+                return {"message": "Error: columns must be a list", "df": df}
+            missing_cols = [col for col in columns if col not in df.columns]
+            if missing_cols:
+                return {
+                    "message": f"Error: The following columns do not exist in the DataFrame: {missing_cols}", 
+                    "df": df
+                }
+        
+        # Count replacements for reporting
+        replacement_count = 0
+        affected_columns = []
+        
+        # Perform the replacement - FIXED to avoid chained assignment warnings
+        if columns is None:
+            # Apply to all columns
+            if inplace:
+                # Use df.replace() with entire mapping for better performance
+                df.replace(value_mapping, inplace=True)
+                result_df = df
+                action = "modified in-place"
+                # Count after replacement for inplace operations
+                for old_val in value_mapping.keys():
+                    mask = df == value_mapping[old_val]  # Check for new values
+                    affected_columns.extend([col for col in df.columns if mask[col].any()])
+                replacement_count = len([col for col in affected_columns])  # Approximate count
+            else:
+                # Create copy and apply replacement
+                result_df = df.replace(value_mapping)
+                action = "created new DataFrame with replaced values"
+                # Count replacements by comparing original vs result
+                for old_val, new_val in value_mapping.items():
+                    mask = df == old_val
+                    replacement_count += mask.sum().sum()
+                    affected_columns.extend([col for col in df.columns if mask[col].any()])
+        else:
+            # Apply to specific columns - FIXED chained assignment
+            if inplace:
+                for col in columns:
+                    # Count before replacement
+                    for old_val, new_val in value_mapping.items():
+                        mask = df[col] == old_val
+                        count = mask.sum()
+                        if count > 0:
+                            replacement_count += count
+                            affected_columns.append(col)
+                    
+                    # Use proper assignment instead of chained inplace operation
+                    df[col] = df[col].replace(value_mapping)
+                
+                result_df = df
+                action = "modified in-place"
+            else:
+                result_df = df.copy()
+                for col in columns:
+                    # Count replacements
+                    for old_val, new_val in value_mapping.items():
+                        mask = result_df[col] == old_val
+                        count = mask.sum()
+                        if count > 0:
+                            replacement_count += count
+                            affected_columns.append(col)
+                    
+                    # Use proper assignment instead of chained inplace operation
+                    result_df[col] = result_df[col].replace(value_mapping)
+                
+                action = "created new DataFrame with replaced values"
+        
+        # Remove duplicates from affected columns
+        affected_columns = list(set(affected_columns))
+        
+        # Prepare result message
+        result_msg = f"Successfully {action}.\n"
+        result_msg += f"Total replacements made: {replacement_count}\n"
+        result_msg += f"Value mapping applied: {value_mapping}\n"
+        result_msg += f"Affected columns: {affected_columns if affected_columns else 'None'}\n"
+        
+        if columns:
+            result_msg += f"Target columns: {columns}\n"
+        else:
+            result_msg += "Applied to: All columns\n"
+        
+        if not inplace:
+            result_msg += "Note: Original DataFrame unchanged."
+        
+        return {"message": result_msg, "df": result_df}
+        
+    except Exception as e:
+        return {"message": f"Error replacing values: {str(e)}", "df": df}
 
+
+# Additional tool for null value replacement with the same format
 @tool
-def replace_empty(df, column, new_value):
+def replace_null_values(df, replacement_value: Any, columns: Optional[List[str]] = None) -> Dict[str, Union[str, pd.DataFrame]]:
     """
-    This tool replaces empty values in a DataFrame column.
-    Use this tool whenever you need to replace empty values in a column.
-    Parameters:
-    - df: The DataFrame to modify.
-    - column: The name of the column to modify.
-    - new_value: The new value to replace empty values.
+    Replace null/NaN values in a pandas DataFrame with a specified value.
+    
+    Args:
+        df: Input pandas DataFrame
+        replacement_value: Value to replace null/NaN values with (supports any type)
+        columns: List of column names to apply replacements to. If None, applies to all columns
+    
+    Returns:
+        dict: A dictionary with:
+            - "message": String describing the operation result.
+            - "df": The DataFrame with null values replaced.
     """
-    df[column] = df[column].replace("", new_value)
-    return df
-
+    try:
+        # Validate inputs
+        if not isinstance(df, pd.DataFrame):
+            return {"message": "Error: Input must be a pandas DataFrame", "df": None}
+        
+        # Validate columns if provided
+        if columns is not None:
+            if not isinstance(columns, list):
+                return {"message": "Error: columns must be a list", "df": df}
+            missing_cols = [col for col in columns if col not in df.columns]
+            if missing_cols:
+                return {
+                    "message": f"Error: The following columns do not exist in the DataFrame: {missing_cols}",
+                    "df": df
+                }
+        
+        # Count null values before replacement
+        if columns is None:
+            null_count = df.isnull().sum().sum()
+            affected_columns = [col for col in df.columns if df[col].isnull().any()]
+        else:
+            null_count = df[columns].isnull().sum().sum()
+            affected_columns = [col for col in columns if df[col].isnull().any()]
+        
+        # Perform the replacement - FIXED to avoid chained assignment
+        if columns is None:
+            result_df = df.fillna(replacement_value)
+            action = "created new DataFrame with null values replaced"
+        else:
+            result_df = df.copy()
+            # Use .loc for explicit assignment to avoid chained assignment warning
+            result_df.loc[:, columns] = result_df[columns].fillna(replacement_value)
+            action = "created new DataFrame with null values replaced"
+        
+        # Prepare result message
+        result_msg = f"Successfully {action}.\n"
+        result_msg += f"Null values replaced: {null_count}\n"
+        result_msg += f"Replacement value: {replacement_value}\n"
+        result_msg += f"Affected columns: {affected_columns if affected_columns else 'None'}\n"
+        
+        if columns:
+            result_msg += f"Target columns: {columns}\n"
+        else:
+            result_msg += "Applied to: All columns\n"
+        
+        result_msg += "Note: Original DataFrame unchanged."
+        
+        return {"message": result_msg, "df": result_df}
+        
+    except Exception as e:
+        return {"message": f"Error replacing null values: {str(e)}", "df": df}
+    
 @tool
-def format_date(df, column, current_format, new_format):
+def change_string_case(df, columns: Optional[List[str]] = None, case_type: str = "lower") -> Dict[str, Union[str, pd.DataFrame]]:
     """
-    This tool formats date values in a DataFrame column.
-    Use this tool whenever you need to format date values in a column.
-    Parameters:
-    - column: The name of the column to modify.
-    - current_format: The current date format of the values in the column.
-    - new_format: The new date format to apply to the values in the column.
-    Skips rows that cannot be formatted.
-    """
-    formatted_values = []
-    for val in df[column]:
-        try:
-            formatted_values.append(pd.to_datetime(val, format=current_format).strftime(new_format))
-        except:
-            formatted_values.append(val)
-    df[column] = formatted_values
-    return df
+    Change the case of string values in specified columns of a pandas DataFrame.
 
+    Args:
+        df: Input pandas DataFrame
+        columns: List of column names to apply case change. If None, applies to all object columns
+        case_type: Type of case change to apply ("lower", "upper", "title")
+
+    Returns:
+        dict: A dictionary with:
+            - "message": String describing the operation result.
+            - "df": The DataFrame with string case changed.
+    """
+    try:
+        # Validate inputs
+        if not isinstance(df, pd.DataFrame):
+            return {"message": "Error: Input must be a pandas DataFrame", "df": None}
+
+        if columns is not None:
+            if not isinstance(columns, list):
+                return {"message": "Error: columns must be a list", "df": df}
+            missing_cols = [col for col in columns if col not in df.columns]
+            if missing_cols:
+                return {
+                    "message": f"Error: The following columns do not exist in the DataFrame: {missing_cols}",
+                    "df": df
+                }
+
+        # Perform the case change
+        result_df = df.copy()
+        if columns is None:
+            # Apply to all object columns
+            object_cols = result_df.select_dtypes(include=["object"]).columns
+            for col in object_cols:
+                if case_type == "lower":
+                    result_df[col] = result_df[col].str.lower()
+                elif case_type == "upper":
+                    result_df[col] = result_df[col].str.upper()
+                elif case_type == "title":
+                    result_df[col] = result_df[col].str.title()
+        else:
+            for col in columns:
+                if case_type == "lower":
+                    result_df[col] = result_df[col].str.lower()
+                elif case_type == "upper":
+                    result_df[col] = result_df[col].str.upper()
+                elif case_type == "title":
+                    result_df[col] = result_df[col].str.title()
+
+        # Prepare result message
+        result_msg = f"Successfully changed string case to {case_type}.\n"
+        result_msg += f"Applied to columns: {columns if columns else 'All object columns'}\n"
+
+        return {"message": result_msg, "df": result_df}
+
+    except Exception as e:
+        return {"message": f"Error changing string case: {str(e)}", "df": df}
+    
 @tool
-def remove_duplicates_from_column(df, column):
+def do_nothing(df) -> Dict[str, Union[str, pd.DataFrame]]:
     """
-    This tool removes duplicate values from a DataFrame column.
-    Use this tool whenever you need to remove duplicates from a column.
-    Parameters:
-    - df: The DataFrame to modify.
-    - column: The name of the column to modify.
-    """
-    df[column] = df[column].drop_duplicates()
-    return df
+    Do nothing and return the original DataFrame.
 
-tools = [rename_column, replace_value, replace_empty, format_date, remove_duplicates_from_column]
+    Args:
+        df: Input pandas DataFrame
+
+    Returns:
+        dict: A dictionary with:
+            - "message": String describing the operation result.
+            - "df": The original DataFrame.
+    """
+    try:
+        if not isinstance(df, pd.DataFrame):
+            return {"message": "Error: Input must be a pandas DataFrame", "df": None}
+
+        return {"message": "No changes made.", "df": df}
+
+    except Exception as e:
+        return {"message": f"Error in do_nothing: {str(e)}", "df": df}
+
+
+tools = [rename_columns, replace_values, replace_null_values, change_string_case, do_nothing]

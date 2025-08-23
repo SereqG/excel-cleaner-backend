@@ -9,25 +9,8 @@ import pandas as pd
 
 agent_mode_blueprint = Blueprint('agent_mode', __name__)
 
-def make_compact_preview(df: pd.DataFrame, sample_rows: int = 20) -> str:
-    schema = [{"name": c, "dtype": str(df[c].dtype)} for c in df.columns]
-    head = df.head(sample_rows).astype(str).to_dict(orient="records")
-    # basic stats without raw PII: counts, nulls, uniques (capped)
-    nulls = {c: int(df[c].isna().sum()) for c in df.columns}
-    uniques = {c: int(df[c].nunique(dropna=True)) for c in df.columns}
-    preview = {
-        "row_count": int(len(df)),
-        "schema": schema,
-        "nulls": nulls,
-        "uniques": uniques,
-        "sample": head  # keep small; redact/omit sensitive columns if needed
-    }
-    import json
-    return json.dumps(preview, ensure_ascii=False)  # pass as compact JSON string
-
 @agent_mode_blueprint.route('/agent-mode', methods=['POST'])
 def agent_mode():
-    from app import logger
     try:
         user_prompt = request.form.get("user_prompt")
         file = request.files["file"]
@@ -39,12 +22,14 @@ def agent_mode():
         
         chain_with_history = set_llm_model("agent")
 
+        print(chain_with_history)
+
+        print("\n\n==================\n\n")
+
         result = chain_with_history.invoke(
             {"input": user_prompt, "df_preview": df},
             config={"configurable": {"session_id": session_id}},
         )
-
-        print(f"LLM result: {result}")
 
         hist = get_session_history(session_id)
         trimmed = last_k(hist.messages, k=6)
@@ -53,53 +38,61 @@ def agent_mode():
 
         # Import all tool functions
         from helpers.tools import (
-            rename_column,
-            replace_value,
-            replace_empty,
-            format_date,
-            remove_duplicates_from_column,
+            rename_columns,
+            replace_values,
+            replace_null_values,
+            change_string_case,
+            do_nothing,
         )
+
+        print("tool calls:", result.tool_calls)
 
         if result.tool_calls:
             for tool_call in result.tool_calls:
                 name = tool_call["name"]
                 args = tool_call["args"]
 
-                if name == "replace_value":
-                    df = replace_value.invoke({
+                if name == "rename_columns":
+                    result = rename_columns.invoke({
                         "df": df,
-                        "column": args.get("column"),
-                        "old_value": args.get("old_value"),
-                        "new_value": args.get("new_value"),
+                        "column_mapping": args.get("column_mapping"),
                     })
-                elif name == "replace_empty":
-                    df = replace_empty.invoke({
+                    df = result["df"]
+
+                if name == "replace_values":
+                    result = replace_values.invoke({
                         "df": df,
-                        "column": args.get("column"),
-                        "new_value": args.get("new_value"),
+                        "value_mapping": args.get("value_mapping"),
+                        "columns": args.get("columns"),
                     })
-                elif name == "rename_column":
-                    df = rename_column.invoke({
+                    df = result["df"]
+
+                if name == "replace_null_values":
+                    result = replace_null_values.invoke({
                         "df": df,
-                        "old_name": args.get("old_name"),
-                        "new_name": args.get("new_name"),
+                        "replacement_value": args.get("replacement_value"),
+                        "columns": args.get("columns"),
                     })
-                elif name == "format_date":
-                    df = format_date.invoke({
+                    df = result["df"]
+
+                if name == "change_string_case":
+                    result = change_string_case.invoke({
                         "df": df,
-                        "column": args.get("column"),
-                        "current_format": args.get("current_format"),
-                        "new_format": args.get("new_format"),
+                        "case": args.get("case"),
+                        "columns": args.get("columns"),
                     })
-                elif name == "remove_duplicates_from_column":
-                    df = remove_duplicates_from_column.invoke({
+                    df = result["df"]
+
+                if name == "do_nothing":
+                    result = do_nothing.invoke({
                         "df": df,
-                        "column": args.get("column"),
                     })
-        # Return preview of modified DataFrame
+                    df = result["df"]
+
+        print("\n\n================\n\n")
+        
         print(df.head())
-        preview = make_compact_preview(df)
-        return jsonify({"session_id": session_id, "preview": preview}), 200
+        return jsonify({"session_id": session_id}), 200
 
     except Exception as e:
         print(f"Error in agent mode: {e}")

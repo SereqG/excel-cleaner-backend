@@ -15,21 +15,27 @@ def set_llm_model(mode):
         max_bucket_size=3
     )
 
-    llm_model = init_chat_model("gpt-4o", model_provider="openai", temperature=0.3, max_tokens=200, max_retries=3, rate_limiter=rate_limiter)
+    llm_model = init_chat_model("gpt-4o", model_provider="openai", temperature=0.3, max_tokens=500, max_retries=3, rate_limiter=rate_limiter)
 
-    llm_model_with_tools = llm_model.bind_tools(tools)
+    llm_model_with_tools = llm_model.bind_tools(tools, tool_choice="any")
 
     system_prompt = SYSTEM_PROMPT_AGENT_MODE if mode == "agent" else SYSTEM_PROMPT_ASK_MODE
 
-    prompt = ChatPromptTemplate([
+    prompt_with_history = ChatPromptTemplate([
         ("system", system_prompt),
         MessagesPlaceholder("history"),
         ("system", "Context: A compact DataFrame preview may follow.\n{df_preview}"),
         ("human", "{input}"),
     ])
 
-    chain = prompt | llm_model
-    chain_with_tools = prompt | llm_model_with_tools
+    prompt_without_history = ChatPromptTemplate([
+        ("system", system_prompt),
+        ("system", "Context: A compact DataFrame preview may follow.\n{df_preview}"),
+        ("human", "{input}"),
+    ])
+
+    chain = prompt_with_history | llm_model
+    chain_with_tools = prompt_without_history | llm_model_with_tools
 
     chain_for_history = chain if mode == "ask" else chain_with_tools
 
@@ -39,5 +45,7 @@ def set_llm_model(mode):
         input_messages_key="input",
         history_messages_key="history",
     )
+
+    
 
     return chain_with_history
