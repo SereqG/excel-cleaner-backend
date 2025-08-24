@@ -6,6 +6,7 @@ from helpers.llm_with_rate_limiter import set_llm_model
 
 import uuid
 import pandas as pd
+import numpy as np
 
 agent_mode_blueprint = Blueprint('agent_mode', __name__)
 
@@ -90,9 +91,9 @@ def agent_mode():
                     df = result["df"]
 
         print("\n\n================\n\n")
-        
+        df.replace(np.nan, None, inplace=True)
         print(df.head())
-        return jsonify({"session_id": session_id}), 200
+        return jsonify({"session_id": session_id, "df_preview": df.head().to_dict(orient="records")}), 200
 
     except Exception as e:
         print(f"Error in agent mode: {e}")
