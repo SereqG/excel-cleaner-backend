@@ -44,6 +44,7 @@ def agent_mode():
             replace_null_values,
             change_string_case,
             do_nothing,
+            set_date_format,
         )
 
         print("tool calls:", result.tool_calls)
@@ -87,6 +88,14 @@ def agent_mode():
                 if name == "do_nothing":
                     result = do_nothing.invoke({
                         "df": df,
+                    })
+                    df = result["df"]
+
+                if name == "set_date_format":
+                    result = set_date_format.invoke({
+                        "df": df,
+                        "column": args.get("column"),
+                        "date_format": args.get("date_format"),
                     })
                     df = result["df"]
 

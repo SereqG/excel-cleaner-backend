@@ -1,13 +1,50 @@
 from typing import Dict, Any, Optional, Union, List
 from langchain_core.tools import tool
 import pandas as pd
+from pydantic import BaseModel, Field
 
-@tool
+# --- Pydantic Schemas (with df: Any) ---
+
+class RenameColumnsSchema(BaseModel):
+    df: Any = Field(..., description="Input pandas DataFrame")
+    column_mapping: Dict[str, str] = Field(..., description="Dictionary mapping old column names to new column names")
+    class Config:
+        arbitrary_types_allowed = True
+
+class ReplaceValuesSchema(BaseModel):
+    df: Any = Field(..., description="Input pandas DataFrame")
+    value_mapping: Dict[Any, Any] = Field(..., description="Dictionary mapping old values to new values")
+    columns: Optional[List[str]] = Field(None, description="List of column names to apply replacements to")
+    class Config:
+        arbitrary_types_allowed = True
+
+class ReplaceNullValuesSchema(BaseModel):
+    df: Any = Field(..., description="Input pandas DataFrame")
+    replacement_value: Any = Field(..., description="Value to replace null/NaN values with")
+    columns: Optional[List[str]] = Field(None, description="List of column names to apply replacements to")
+    class Config:
+        arbitrary_types_allowed = True
+
+class ChangeStringCaseSchema(BaseModel):
+    df: Any = Field(..., description="Input pandas DataFrame")
+    columns: Optional[List[str]] = Field(None, description="List of column names to apply case change")
+    case_type: str = Field("lower", description='Type of case change to apply ("lower", "upper", "title")')
+    class Config:
+        arbitrary_types_allowed = True
+
+class SetDateFormatSchema(BaseModel):
+    df: Any = Field(..., description="Input pandas DataFrame")
+    column: str = Field(..., description="Column name to format as date")
+    date_format: str = Field(..., description="Desired date format (strftime syntax)")
+    class Config:
+        arbitrary_types_allowed = True
+
+@tool(args_schema=RenameColumnsSchema)
 def rename_columns(df, column_mapping: Dict[str, str]) -> str:
     """
     Renames columns in a pandas DataFrame (direct DataFrame input).
-    
-    Args:
+
+    Args (all required):
         df: Input pandas DataFrame (leave null for now).
         column_mapping: Dictionary mapping old column names to new column names
 
@@ -60,12 +97,12 @@ def rename_columns(df, column_mapping: Dict[str, str]) -> str:
         return f"Error renaming columns: {str(e)}"
     
 
-@tool
+@tool(args_schema=ReplaceValuesSchema)
 def replace_values(df, value_mapping: Dict[Any, Any], columns: Optional[List[str]] = None) -> Dict[str, Union[str, pd.DataFrame]]:
     """
     Replace values in a pandas DataFrame (direct DataFrame input).
-    
-    Args:
+
+    Args (all required):
         df: Input pandas DataFrame (leave null for now).
         value_mapping: Dictionary mapping old values to new values (supports any type including None/null)
         columns: List of column names to apply replacements to. If None, applies to all columns
@@ -178,12 +215,12 @@ def replace_values(df, value_mapping: Dict[Any, Any], columns: Optional[List[str
 
 
 # Additional tool for null value replacement with the same format
-@tool
+@tool(args_schema=ReplaceNullValuesSchema)
 def replace_null_values(df, replacement_value: Any, columns: Optional[List[str]] = None) -> Dict[str, Union[str, pd.DataFrame]]:
     """
     Replace null/NaN values in a pandas DataFrame with a specified value.
-    
-    Args:
+
+    Args (all required):
         df: Input pandas DataFrame
         replacement_value: Value to replace null/NaN values with (supports any type)
         columns: List of column names to apply replacements to. If None, applies to all columns
@@ -245,12 +282,12 @@ def replace_null_values(df, replacement_value: Any, columns: Optional[List[str]]
     except Exception as e:
         return {"message": f"Error replacing null values: {str(e)}", "df": df}
     
-@tool
+@tool(args_schema=ChangeStringCaseSchema)
 def change_string_case(df, columns: Optional[List[str]] = None, case_type: str = "lower") -> Dict[str, Union[str, pd.DataFrame]]:
     """
     Change the case of string values in specified columns of a pandas DataFrame.
 
-    Args:
+    Args (all required):
         df: Input pandas DataFrame
         columns: List of column names to apply case change. If None, applies to all object columns
         case_type: Type of case change to apply ("lower", "upper", "title")
@@ -305,12 +342,12 @@ def change_string_case(df, columns: Optional[List[str]] = None, case_type: str =
     except Exception as e:
         return {"message": f"Error changing string case: {str(e)}", "df": df}
     
-@tool
+@tool  # No schema needed, only df
 def do_nothing(df) -> Dict[str, Union[str, pd.DataFrame]]:
     """
     Do nothing and return the original DataFrame.
 
-    Args:
+    Args (all required):
         df: Input pandas DataFrame
 
     Returns:
@@ -327,5 +364,36 @@ def do_nothing(df) -> Dict[str, Union[str, pd.DataFrame]]:
     except Exception as e:
         return {"message": f"Error in do_nothing: {str(e)}", "df": df}
 
+@tool(args_schema=SetDateFormatSchema)
+def set_date_format(df, column: str, date_format: str) -> Dict[str, Union[str, pd.DataFrame]]:
+    """
+    Set a specific date format for a column in a pandas DataFrame.
 
-tools = [rename_columns, replace_values, replace_null_values, change_string_case, do_nothing]
+    Args:
+        df: Input pandas DataFrame
+        column: Column name to format as date
+        date_format: Desired date format (strftime syntax)
+
+    Returns:
+        dict: {
+            "message": Description of the operation,
+            "df": DataFrame with formatted date column
+        }
+    """
+    try:
+        if not isinstance(df, pd.DataFrame):
+            return {"message": "Error: Input must be a pandas DataFrame", "df": None}
+        if column not in df.columns:
+            return {"message": f"Error: Column '{column}' does not exist in the DataFrame", "df": df}
+        # Convert column to datetime, then format
+        result_df = df.copy()
+        try:
+            result_df[column] = pd.to_datetime(result_df[column], errors="coerce").dt.strftime(date_format)
+        except Exception as e:
+            return {"message": f"Error formatting date: {str(e)}", "df": df}
+        msg = f"Successfully formatted column '{column}' to date format '{date_format}'."
+        return {"message": msg, "df": result_df}
+    except Exception as e:
+        return {"message": f"Error in set_date_format: {str(e)}", "df": df}
+
+tools = [rename_columns, replace_values, replace_null_values, change_string_case, do_nothing, set_date_format]
