@@ -7,6 +7,7 @@ from helpers.llm_with_rate_limiter import set_llm_model
 import uuid
 import pandas as pd
 import numpy as np
+import json
 
 agent_mode_blueprint = Blueprint('agent_mode', __name__)
 
@@ -14,18 +15,13 @@ agent_mode_blueprint = Blueprint('agent_mode', __name__)
 def agent_mode():
     try:
         user_prompt = request.form.get("user_prompt")
-        file = request.files["file"]
+        file = request.form.get("file")
         session_id = request.form.get("session_id") or str(uuid.uuid4())
 
-        df = pd.read_excel(file)
-        if df.empty:
-            return jsonify({"error": "Uploaded file is empty"}), 400
+        formatted_data = json.loads(file)
+        df = pd.DataFrame(formatted_data)
         
         chain_with_history = set_llm_model("agent")
-
-        print(chain_with_history)
-
-        print("\n\n==================\n\n")
 
         result = chain_with_history.invoke(
             {"input": user_prompt, "df_preview": df},
@@ -49,10 +45,16 @@ def agent_mode():
 
         print("tool calls:", result.tool_calls)
 
+        used_tools = set()
+        affected_columns = set()
+
         if result.tool_calls:
             for tool_call in result.tool_calls:
                 name = tool_call["name"]
                 args = tool_call["args"]
+
+                # Track tool usage
+                used_tools.add(name)
 
                 if name == "rename_columns":
                     result = rename_columns.invoke({
@@ -60,6 +62,8 @@ def agent_mode():
                         "column_mapping": args.get("column_mapping"),
                     })
                     df = result["df"]
+                    # Add affected columns
+                    affected_columns.update(list(args.get("column_mapping", {}).keys()))
 
                 if name == "replace_values":
                     result = replace_values.invoke({
@@ -68,6 +72,12 @@ def agent_mode():
                         "columns": args.get("columns"),
                     })
                     df = result["df"]
+                    # Add affected columns
+                    cols = args.get("columns")
+                    if cols:
+                        affected_columns.update(cols)
+                    else:
+                        affected_columns.update(list(df.columns))
 
                 if name == "replace_null_values":
                     result = replace_null_values.invoke({
@@ -76,6 +86,11 @@ def agent_mode():
                         "columns": args.get("columns"),
                     })
                     df = result["df"]
+                    cols = args.get("columns")
+                    if cols:
+                        affected_columns.update(cols)
+                    else:
+                        affected_columns.update(list(df.columns))
 
                 if name == "change_string_case":
                     result = change_string_case.invoke({
@@ -84,12 +99,19 @@ def agent_mode():
                         "columns": args.get("columns"),
                     })
                     df = result["df"]
+                    cols = args.get("columns")
+                    if cols:
+                        affected_columns.update(cols)
+                    else:
+                        # Only object columns
+                        affected_columns.update(list(df.select_dtypes(include=["object"]).columns))
 
                 if name == "do_nothing":
                     result = do_nothing.invoke({
                         "df": df,
                     })
                     df = result["df"]
+                    # No affected columns
 
                 if name == "set_date_format":
                     result = set_date_format.invoke({
@@ -98,11 +120,17 @@ def agent_mode():
                         "date_format": args.get("date_format"),
                     })
                     df = result["df"]
+                    affected_columns.add(args.get("column"))
 
-        print("\n\n================\n\n")
         df.replace(np.nan, None, inplace=True)
         print(df.head())
-        return jsonify({"session_id": session_id, "df_preview": df.head().to_dict(orient="records")}), 200
+        return jsonify({
+            "session_id": session_id,
+            "df_preview": df.head().to_dict(orient="records"),
+            "full_df": df.to_dict(orient="records"),
+            "used_tools": list(used_tools),
+            "affected_columns": list(affected_columns)
+        }), 200
 
     except Exception as e:
         print(f"Error in agent mode: {e}")
