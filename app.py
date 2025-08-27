@@ -1,5 +1,7 @@
 import os
 import logging
+import redis
+
 from dotenv import load_dotenv
 
 from flask import Flask
@@ -7,6 +9,14 @@ from flask_cors import CORS
 
 from blueprints import blueprints
 
+r = redis.Redis(
+    host=os.getenv("REDIS_HOST", "localhost"),
+    port=int(os.getenv("REDIS_PORT", 6379)),
+    username=os.getenv("REDIS_USERNAME", "default"),
+    password=os.getenv("REDIS_PASSWORD", "default"),
+    decode_responses=False
+
+)
 
 load_dotenv()
 config = {

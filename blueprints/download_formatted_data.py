@@ -13,9 +13,6 @@ def download_formatted_file():
     data = request.form.get("formattedData")
     columns = request.form.get("columns")
 
-    print(f"data: {data}")
-    print(f"columns: {columns}")
-
 
     if not data:
         return jsonify({"error": "No formatted data provided"}), 400

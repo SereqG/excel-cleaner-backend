@@ -8,18 +8,22 @@ import uuid
 import pandas as pd
 import numpy as np
 import json
+import pickle
+import zstandard as zstd
 
 agent_mode_blueprint = Blueprint('agent_mode', __name__)
 
 @agent_mode_blueprint.route('/agent-mode', methods=['POST'])
 def agent_mode():
+    from app import r
     try:
         user_prompt = request.form.get("user_prompt")
-        file = request.form.get("file")
         session_id = request.form.get("session_id") or str(uuid.uuid4())
 
-        formatted_data = json.loads(file)
-        df = pd.DataFrame(formatted_data)
+        raw_df_from_redis = r.get(session_id)
+        df = pickle.loads(zstd.ZstdDecompressor().decompress(raw_df_from_redis))
+
+        print(df.head())
         
         chain_with_history = set_llm_model("agent")
 
@@ -42,8 +46,6 @@ def agent_mode():
             do_nothing,
             set_date_format,
         )
-
-        print("tool calls:", result.tool_calls)
 
         used_tools = set()
         affected_columns = set()
@@ -121,6 +123,8 @@ def agent_mode():
                     })
                     df = result["df"]
                     affected_columns.add(args.get("column"))
+
+        r.set(session_id, zstd.ZstdCompressor(level=10).compress(pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)), ex=3*60*60)
 
         df.replace(np.nan, None, inplace=True)
         print(df.head())
