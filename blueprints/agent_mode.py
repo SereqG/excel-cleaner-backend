@@ -7,7 +7,6 @@ from helpers.llm_with_rate_limiter import set_llm_model
 import uuid
 import pandas as pd
 import numpy as np
-import json
 import pickle
 import zstandard as zstd
 
@@ -23,9 +22,8 @@ def agent_mode():
         raw_df_from_redis = r.get(session_id)
         df = pickle.loads(zstd.ZstdDecompressor().decompress(raw_df_from_redis))
 
-        print(df.head())
-        
         chain_with_history = set_llm_model("agent")
+
 
         result = chain_with_history.invoke(
             {"input": user_prompt, "df_preview": df},
@@ -126,13 +124,14 @@ def agent_mode():
 
         r.set(session_id, zstd.ZstdCompressor(level=10).compress(pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)), ex=3*60*60)
 
-        df.replace(np.nan, None, inplace=True)
-        print(df.head())
+        df.replace({np.nan: pd.NA}, inplace=True)
+        print("df head:", df.head())
         return jsonify({
             "session_id": session_id,
             "df_preview": df.head().to_dict(orient="records"),
             "full_df": df.to_dict(orient="records"),
             "used_tools": list(used_tools),
+            "columns": list(df.columns),
             "affected_columns": list(affected_columns)
         }), 200
 

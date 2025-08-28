@@ -16,8 +16,7 @@ def convert():
         session_id = request.form.get('sessionId')
 
         df = pd.read_excel(file)
-        df.replace(np.nan, None, inplace=True)
-
+        df.replace({np.nan: pd.NA}, inplace=True)
 
         payload = pickle.dumps(df, protocol=pickle.HIGHEST_PROTOCOL)
         payload = zstd.ZstdCompressor(level=10).compress(payload)
@@ -25,7 +24,7 @@ def convert():
             r.set(session_id, payload)
 
         df_to_send = pd.read_excel(file, dtype=str)
-        df_to_send.replace(np.nan, None, inplace=True)
+        df_to_send.replace({np.nan: pd.NA}, inplace=True)
 
         if df_to_send.empty:
             return jsonify({"error": "Uploaded file is empty"}), 400

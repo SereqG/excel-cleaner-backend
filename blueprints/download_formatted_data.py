@@ -22,7 +22,7 @@ def download_formatted_file():
         new_df = pd.DataFrame(columns=json.loads(columns))
         for col in json.loads(columns):
             new_df[col] = df[col]
-        print(new_df.head())
+
         output = BytesIO()
         new_df.to_excel(output, index=False, engine='openpyxl')
         output.seek(0)
