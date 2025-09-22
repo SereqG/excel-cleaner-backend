@@ -19,9 +19,6 @@ r = redis.Redis(
 )
 
 load_dotenv()
-config = {
-    "OPENAI_API_KEY": os.getenv("OPENAI_API_KEY")
-}
 
 logging.basicConfig(
     level=logging.INFO,
