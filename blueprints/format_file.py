@@ -50,7 +50,7 @@ def format_file():
                     continue
                 
                 replace_value = role["replaceBlankSpacesWith"]
-                df[column_name].replace(np.nan, replace_value, inplace=True)
+                df[column_name] = df[column_name].fillna(replace_value)
                 
             column_name = role.get("columnName")
             if column_name not in df.columns:
@@ -60,8 +60,10 @@ def format_file():
             if role.get("roundDecimals") is not None:
                 try:
                     decimals = int(role["roundDecimals"])
+                    df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
                     if pd.api.types.is_numeric_dtype(df[column_name].dtype):
-                        df[column_name] = df[column_name].round(decimals)
+                        df[column_name] = df[column_name].map(lambda x: f"{x:.{decimals}f}")
+                        
                 except (ValueError, TypeError):
                     logger.warning(f"Invalid decimal value for column {column_name}")
             
@@ -95,6 +97,7 @@ def format_file():
                     logger.warning(f"Error formatting date for column {column_name}: {e}")
 
         df.replace(np.nan, None, inplace=True)
+        df.replace("nan", None, inplace=True)
         formatted_data = df.where(pd.notnull(df), None).to_dict(orient='records')
 
         return jsonify({"formattedData": formatted_data}), 200
